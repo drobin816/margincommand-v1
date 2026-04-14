@@ -55,6 +55,21 @@ SERVICE_FLOOR_BY_PHASE = {
 DEFAULT_TARGET_BOH_PCT = 11.0
 DEFAULT_TARGET_TOTAL_PCT = 16.0
 
+BENCHMARK_SALES = {
+    "Lunch": 7000,
+    "Dinner": {
+        "Monday": 9000,
+        "Tuesday": 10000,
+        "Wednesday": 11000,
+        "Thursday": 13000,
+        "Friday": 16000,
+        "Saturday": 18000,
+        "Sunday": 14000,
+        "default": 12000,
+    },
+}
+
+
 # ============================================================
 # REAL AMORE SERVICE CURVES — built from R365 hourly sales data
 # 2/18/2026 - 4/7/2026 | 8 buckets = 3PM 4PM 5PM 6PM 7PM 8PM 9PM 10PM
@@ -510,52 +525,35 @@ def build_sales_vectors(
     actual_sales_so_far: float,
     projected_final_sales: float,
     elapsed_hours: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    benchmark_final_sales: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    Returns three CUMULATIVE sales vectors — one point per bucket boundary.
+    Returns four CUMULATIVE sales vectors — one point per bucket boundary.
 
-    Y axis = total dollars accumulated from open to that point in the shift.
-    The slope of the actual line at the 'Now' marker = current sales pace ($/hr),
-    matching the pace callout exactly.
-
-    - expected_cumulative:  cumulative sales the curve predicts at each bucket boundary
-    - actual_cumulative:    synthetic cumulative curve anchored to actual_sales_so_far at
-                            elapsed_hours, shaped by the demand curve so the slope at
-                            'now' equals the actual_pace_per_hr
-    - projected_cumulative: continues from actual_sales_so_far to projected_final_sales
-                            following the remaining curve shape
-
-    All three start at $0 at open and are plotted at bucket boundaries (n+1 points
-    for n buckets) so the chart reads as a smooth rising curve.
+    - benchmark_cumulative: fixed benchmark line using the same service curve
+    - expected_cumulative:  adaptive expected line using projected_final_sales
+    - actual_cumulative:    anchored to actual sales at current elapsed time
+    - projected_cumulative: continues from current actual point to projected final sales
     """
     bucket_count = len(curve)
     if bucket_count == 0 or hours_open == 0:
         empty = np.zeros(2)
-        return empty, empty, empty
+        return empty, empty, empty, empty
 
     bucket_size_hrs = hours_open / bucket_count
 
-    # Build cumulative expected: sum curve weights up to each bucket boundary
-    # Points: 0 at open, then cumulative at end of each bucket
     cum_curve = np.concatenate([[0.0], np.cumsum(curve)])  # length bucket_count+1
+    benchmark_cumulative = cum_curve * benchmark_final_sales
     expected_cumulative = cum_curve * projected_final_sales
 
-    # Current position
     completed_buckets = int(clamp(math.floor(elapsed_hours / bucket_size_hrs), 0, bucket_count))
     partial_ratio = clamp(
         (elapsed_hours - completed_buckets * bucket_size_hrs) / bucket_size_hrs
-        if bucket_size_hrs > 0 else 0, 0, 1
+        if bucket_size_hrs > 0 else 0,
+        0,
+        1,
     )
-    actual_pace_per_hr = actual_sales_so_far / max(elapsed_hours, 0.25)
 
-    # Build actual cumulative using a simple linear interpolation anchored to
-    # two hard facts: $0 at open and actual_sales_so_far at elapsed_hours.
-    # We shape the curve using the demand curve weights so it rises naturally,
-    # but the terminal value is ALWAYS exactly actual_sales_so_far.
-    #
-    # For each completed whole bucket boundary i, the cumulative actual is:
-    #   actual[i] = actual_sales_so_far * (cum_curve[i] / cum_curve_at_now)
-    # where cum_curve_at_now is the interpolated curve value at elapsed_hours.
     cum_curve_at_now = (
         cum_curve[completed_buckets]
         + (cum_curve[min(completed_buckets + 1, bucket_count)] - cum_curve[completed_buckets])
@@ -567,15 +565,11 @@ def build_sales_vectors(
     actual_cumulative[0] = 0.0
     for i in range(1, completed_buckets + 1):
         actual_cumulative[i] = actual_sales_so_far * (cum_curve[i] / cum_curve_at_now)
-    # Terminal point: always exactly actual_sales_so_far at marker position
-    # This ensures the line ends AT the actual number, not an approximation
     if completed_buckets < bucket_count:
         actual_cumulative[completed_buckets] = actual_sales_so_far
     else:
         actual_cumulative[bucket_count] = actual_sales_so_far
 
-    # Build projected cumulative: starts at actual_sales_so_far at 'now',
-    # follows remaining curve shape to projected_final_sales
     projected_cumulative = np.full(bucket_count + 1, np.nan)
     projected_cumulative[completed_buckets] = actual_sales_so_far
     remaining_sales = max(projected_final_sales - actual_sales_so_far, 0.0)
@@ -584,22 +578,21 @@ def build_sales_vectors(
         frac = (cum_curve[i] - cum_curve[completed_buckets]) / max(remaining_curve_total, 0.001)
         projected_cumulative[i] = actual_sales_so_far + remaining_sales * frac
 
-    return expected_cumulative, actual_cumulative, projected_cumulative
+    return benchmark_cumulative, expected_cumulative, actual_cumulative, projected_cumulative
 
 
 def build_service_chart(model: dict, open_t: time) -> go.Figure:
     hours_open = model["hours_open"]
-    hours_open_so_far = model["hours_open_so_far"]
+    elapsed_hours = model["hours_open_so_far"]
+
+    benchmark_cum = model["benchmark_hourly"]
     expected_cum = model["expected_hourly"]
     actual_cum = model["actual_line"]
-    projected_cum = model["projected_hourly"]
+    proj_cum = model["projected_hourly"]
 
     bucket_count = len(expected_cum) - 1
-    if bucket_count <= 0 or hours_open <= 0:
-        return go.Figure()
-
     total_minutes_open = int(round(hours_open * 60))
-    bucket_size_minutes = total_minutes_open / bucket_count
+    bucket_size_minutes = total_minutes_open / bucket_count if bucket_count > 0 else 1.0
     open_minutes = open_t.hour * 60 + open_t.minute
 
     def fmt_clock(total_minutes: int) -> str:
@@ -609,43 +602,39 @@ def build_service_chart(model: dict, open_t: time) -> go.Figure:
         h12 = h % 12 or 12
         return f"{h12}:{m:02d}{suffix}" if m else f"{h12}{suffix}"
 
-    # Real-time x-axis in minutes from open
+    # True time-based x-axis in minutes from open
     x_boundary = [i * bucket_size_minutes for i in range(bucket_count + 1)]
 
-    # Clean 30-minute ticks on the same minute-based scale
     tick_minutes = list(range(0, total_minutes_open + 1, 30))
     if tick_minutes[-1] != total_minutes_open:
         tick_minutes.append(total_minutes_open)
     tickvals = tick_minutes
     ticktext = [fmt_clock(open_minutes + mins) for mins in tick_minutes]
 
-    # Current marker position in minutes from open
-    marker_x = clamp(hours_open_so_far * 60, 0, total_minutes_open)
-    marker_label = fmt_clock(int(round(open_minutes + marker_x)))
+    marker_x = elapsed_hours * 60
+    marker_x = clamp(marker_x, 0, total_minutes_open)
+    marker_label = fmt_clock(open_minutes + int(round(marker_x)))
 
-    # Actual cumulative: completed boundaries plus one exact terminal point at now
     actual_x = []
     actual_y = []
-    completed_boundaries = int(marker_x // bucket_size_minutes)
+    completed_minutes = int(marker_x // bucket_size_minutes) if bucket_size_minutes > 0 else 0
 
     for i, val in enumerate(actual_cum):
         if np.isnan(val):
             continue
-        if i <= completed_boundaries:
-            actual_x.append(i * bucket_size_minutes)
+        x_val = i * bucket_size_minutes
+        if x_val <= completed_minutes * bucket_size_minutes:
+            actual_x.append(x_val)
             actual_y.append(val)
 
     actual_sales_now = model["sales_so_far"]
     if not actual_x or actual_x[-1] < marker_x:
         actual_x.append(marker_x)
         actual_y.append(actual_sales_now)
-    elif actual_x[-1] == marker_x:
-        actual_y[-1] = actual_sales_now
 
-    # Projected cumulative: from now to close on minute-based scale
     proj_x = []
     proj_y = []
-    for i, val in enumerate(projected_cum):
+    for i, val in enumerate(proj_cum):
         if np.isnan(val):
             continue
         proj_x.append(i * bucket_size_minutes)
@@ -656,10 +645,20 @@ def build_service_chart(model: dict, open_t: time) -> go.Figure:
     fig.add_trace(
         go.Scatter(
             x=x_boundary,
+            y=benchmark_cum,
+            mode="lines",
+            name="Benchmark",
+            line=dict(color="#f59e0b", width=2, dash="dot"),
+        )
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=x_boundary,
             y=expected_cum,
             mode="lines",
-            name="Expected Pace",
-            line=dict(color="rgba(255,255,255,0.65)", width=3, dash="dot"),
+            name="Dynamic Expected",
+            line=dict(color="rgba(255,255,255,0.70)", width=3, dash="dot"),
         )
     )
 
@@ -706,6 +705,7 @@ def build_service_chart(model: dict, open_t: time) -> go.Figure:
             ticktext=ticktext,
             title=None,
             tickfont=dict(size=12, color="rgba(255,255,255,0.75)"),
+            range=[0, total_minutes_open],
         ),
         yaxis=dict(
             title="Cumulative Sales ($)",
@@ -1155,12 +1155,18 @@ def build_projection_model(
     else:
         cut_sequence.append(("Closeout", f"Hold at closeout floor: {closeout_floor['line_cooks']} cooks + {closeout_floor['dishwashers']} dish", "yellow"))
 
-    expected_hourly, actual_line, projected_hourly = build_sales_vectors(
+    if shift == "Lunch":
+        benchmark_final_sales = BENCHMARK_SALES["Lunch"]
+    else:
+        benchmark_final_sales = BENCHMARK_SALES["Dinner"].get(day_name, BENCHMARK_SALES["Dinner"]["default"])
+
+    benchmark_hourly, expected_hourly, actual_line, projected_hourly = build_sales_vectors(
         hours_open=hours_open,
         curve=curve,
         actual_sales_so_far=sales_so_far,
         projected_final_sales=projected_final_sales,
         elapsed_hours=hours_open_so_far,
+        benchmark_final_sales=benchmark_final_sales,
     )
 
     affordable_hours_left = boh_room_left / max(boh_burn_per_hour, 1) if boh_room_left > 0 else 0.0
@@ -1231,6 +1237,8 @@ def build_projection_model(
         "closeout_floor": closeout_floor,
         "next_check": next_check,
         "happy_hour_note": HH_NOTES.get(day_name, ""),
+        "benchmark_final_sales": benchmark_final_sales,
+        "benchmark_hourly": benchmark_hourly,
         "expected_hourly": expected_hourly,
         "actual_line": actual_line,
         "projected_hourly": projected_hourly,
@@ -2001,6 +2009,7 @@ with st.expander("Advanced Metrics", expanded=False):
 
     with c1:
         st.markdown(f"<div class='subtle'>Projected final sales: {money(model['projected_final_sales'])}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='subtle'>Benchmark sales target: {money(model['benchmark_final_sales'])}</div>", unsafe_allow_html=True)
         st.markdown(f"<div class='subtle'>Expected sales so far: {money(model['expected_sales_so_far'])}</div>", unsafe_allow_html=True)
         st.markdown(f"<div class='subtle'>Target BOH dollars: {money(model['target_boh_dollars'])}</div>", unsafe_allow_html=True)
         st.markdown(f"<div class='subtle'>Target total labor dollars: {money(model['target_total_labor_dollars'])}</div>", unsafe_allow_html=True)
@@ -2059,6 +2068,35 @@ with st.expander("Advanced Metrics", expanded=False):
                     <div style="font-size: 0.9rem; color: #f8fafc; margin-top: 2px;">
                         Running <strong style="color:{pace_color};">{pace_dir} expected</strong> right now &nbsp;·&nbsp;
                         Actual: {money_hr(model['actual_sales_pace'])} &nbsp;·&nbsp; Expected: {money_hr(model['expected_sales_pace'])}
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        benchmark_gap = model["sales_so_far"] - (model["benchmark_final_sales"] * model["curve_progress"])
+        benchmark_dir = "ahead of" if benchmark_gap >= 0 else "behind"
+        benchmark_color = "#22c55e" if benchmark_gap >= 0 else "#f59e0b"
+        st.markdown(
+            f"""
+            <div style="
+                background: rgba(8,15,32,0.95);
+                border: 1px solid {benchmark_color}44;
+                border-left: 5px solid {benchmark_color};
+                border-radius: 14px;
+                padding: 12px 18px;
+                display: flex;
+                align-items: center;
+                gap: 14px;
+                margin-top: 10px;
+            ">
+                <div style="font-size: 1.2rem; font-weight: 900; color: {benchmark_color};">{money(abs(benchmark_gap))}</div>
+                <div>
+                    <div style="font-size: 0.78rem; font-weight: 800; text-transform: uppercase; color: #94a3b8; letter-spacing: 0.06em;">Current Position vs Benchmark</div>
+                    <div style="font-size: 0.88rem; color: #f8fafc; margin-top: 2px;">
+                        Currently <strong style="color:{benchmark_color};">{benchmark_dir} benchmark</strong> right now &nbsp;·&nbsp;
+                        Benchmark target by now: {money(model["benchmark_final_sales"] * model["curve_progress"])}
                     </div>
                 </div>
             </div>
