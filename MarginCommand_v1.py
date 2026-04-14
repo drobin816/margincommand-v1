@@ -614,12 +614,25 @@ def build_service_chart(model: dict, open_t: time) -> go.Figure:
     # X tick labels at each bucket boundary = clock time at that boundary
     x_labels = [bucket_to_label(i) for i in x_boundary]
 
-    # Force clean 30-minute tick marks
-    half_hour_steps = max(int(round(0.5 / bucket_size_hrs)), 1)
-    tickvals = [i for i in x_boundary if i % half_hour_steps == 0]
-    if x_boundary[-1] not in tickvals:
-        tickvals.append(x_boundary[-1])
-    ticktext = [bucket_to_label(i) for i in tickvals]
+    # TRUE 30-minute ticks based on real time (no drift)
+    total_minutes_open = int(round(hours_open * 60))
+
+    tick_minutes = list(range(0, total_minutes_open + 1, 30))
+    if tick_minutes[-1] != total_minutes_open:
+        tick_minutes.append(total_minutes_open)
+
+    tickvals = [mins / (bucket_size_hrs * 60) for mins in tick_minutes]
+
+    def fmt_clock(total_minutes: int) -> str:
+        h = (total_minutes // 60) % 24
+        m = total_minutes % 60
+        suffix = "AM" if h < 12 else "PM"
+        h12 = h % 12 or 12
+        if m == 0:
+            return f"{h12}{suffix}"
+        return f"{h12}:{m:02d}{suffix}"
+
+    ticktext = [fmt_clock(open_minutes + mins) for mins in tick_minutes]
 
     # Current position in bucket-space (fractional boundary units)
     marker_x = elapsed_hours / bucket_size_hrs if bucket_size_hrs > 0 else 0
