@@ -205,8 +205,13 @@ st.markdown(
 
     .block-container {
         max-width: 1450px;
-        padding-top: 1.0rem;
+        padding-top: 4.75rem;
         padding-bottom: 2rem;
+    }
+
+    header {visibility: hidden;}
+    [data-testid="stHeader"] {
+        background: transparent;
     }
 
     h1, h2, h3, h4, h5, h6, p, div, span, label {
@@ -935,6 +940,1175 @@ def build_projection_model(
     )
 
     if is_closed:
+        if burn_gap > 35 and above_floor_line + above_floor_dish > 0:
+            decision = "TIGHTEN CLOSEOUT"
+        else:
+            decision = "CLOSE WITH CONTROL"
+    else:
+        if small_sample_protection:
+            decision = "HOLD STEADY"
+        elif early_phase_protection and burn_gap > 25:
+            decision = "PREP TO CUT"
+        elif burn_gap > 55 and hours_until_tight < 1.0 and (above_floor_line + above_floor_dish) > 0:
+            decision = "CUT NOW"
+        elif is_soft_night and burn_gap > 0:
+            # Soft night: pace is trailing and we have room to cut — escalate
+            decision = "CUT NOW" if burn_gap > 30 else "PREP TO CUT"
+        elif declining_momentum:
+            # Room is almost gone and pace is soft — protect the finish
+            decision = "CUT NOW" if hours_until_tight < 0.5 else "PREP TO CUT"
+        elif burn_gap > 15 and (above_floor_line + above_floor_dish) > 0:
+            decision = "PREP TO CUT"
+        else:
+            decision = "HOLD STEADY"
+
+    if decision == "HOLD STEADY":
+        hero_class = "hero-green"
+        hero_sub = "Current staffing still fits the moment."
+        if phase == "PEAK":
+            what_matters = "You are in the strongest demand window. Labor decisions matter most here"
+        elif phase == "DECLINE":
+            what_matters = "Peak has passed. Sales are still coming in, but the slope is weakening"
+        else:
+            what_matters = "The room is still building. Pace matters more than isolated tickets"
+    elif decision == "PREP TO CUT":
+        hero_class = "hero-orange"
+        hero_sub = "Room is tightening. Start lining up the next move without hurting execution."
+        what_matters = "Decline phase. Start identifying the next cut while protecting service"
+    elif decision == "CUT NOW":
+        hero_class = "hero-red"
+        hero_sub = "Remaining revenue no longer supports current staffing."
+        what_matters = "Make the next reduction now to protect the finish"
+    elif decision == "TIGHTEN CLOSEOUT":
+        hero_class = "hero-orange"
+        hero_sub = "Final sales are locked. You are above closeout floor and still burning unnecessary labor."
+        what_matters = "Revenue is done. Tighten one closeout position now"
+    else:
+        hero_class = "hero-blue"
+        hero_sub = "Final sales are locked. Finish clean and get the team out inside target."
+        what_matters = "Revenue is done. Close with purpose and keep the team moving"
+
+    if is_closed:
+        why_now = (
+            f"Sales are locked. Current BOH burn is {money_hr(boh_burn_per_hour)}. "
+            f"Remaining BOH room is {money(boh_room_left)}. Closeout floor is "
+            f"{closeout_floor['line_cooks']} cooks and {closeout_floor['dishwashers']} dish."
+        )
+    else:
+        why_now = (
+            f"Actual pace is {'ahead of' if pace_difference >= 0 else 'behind'} expected by "
+            f"{money_hr(abs(pace_difference))}. Current BOH burn is {money_hr(boh_burn_per_hour)} "
+            f"vs allowed burn {money_hr(allowed_boh_burn)}. Remaining BOH room is {money(boh_room_left)}. "
+            f"Floor is {floor_now['line_cooks']} cooks and {floor_now['dishwashers']} dish."
+        )
+
+    if is_closed:
+        recovery_label = "None"
+        recovery_copy = "No remaining revenue is left to recover labor. Closeout is now pure control."
+        recovery_fill = 0
+        recovery_bar = "bar-fill-red"
+    else:
+        if boh_room_left <= 0:
+            recovery_label = "No room left"
+            recovery_copy = "Current labor has already used the room left before missing target."
+            recovery_fill = 100
+            recovery_bar = "bar-fill-red"
+        elif recovery_ratio >= 8:
+            recovery_label = "Plenty left"
+            recovery_copy = "There is still enough revenue left to support current staffing if execution is strong."
+            recovery_fill = 72
+            recovery_bar = "bar-fill-green"
+        elif recovery_ratio >= 3:
+            recovery_label = "Some left"
+            recovery_copy = "There is still recoverable revenue left, but the room is getting smaller."
+            recovery_fill = 48
+            recovery_bar = "bar-fill-yellow"
+        else:
+            recovery_label = "Very little left"
+            recovery_copy = "Remaining sales are getting harder to usefully recover against labor."
+            recovery_fill = 24
+            recovery_bar = "bar-fill-red"
+
+    if projected_boh_pct <= target_boh_pct * 0.82:
+        pressure_label = "Comfortable"
+        pressure_copy = "Labor still has enough room for this point in the shift."
+        pressure_fill = 30
+        pressure_bar = "bar-fill-green"
+    elif projected_boh_pct <= target_boh_pct:
+        pressure_label = "Manageable"
+        pressure_copy = "The finish is still inside target, but not loose."
+        pressure_fill = 56
+        pressure_bar = "bar-fill-yellow"
+    else:
+        pressure_label = "Tight"
+        pressure_copy = "Current labor is above the supported level from here."
+        pressure_fill = 84
+        pressure_bar = "bar-fill-red"
+
+    if is_closed:
+        momentum_label = "Locked"
+        momentum_copy = "Revenue is over for this shift."
+        momentum_fill = 100
+        momentum_bar = "bar-fill-green"
+    else:
+        if pace_difference >= 250:
+            momentum_label = "Holding"
+            momentum_copy = "Sales are still coming in well for this phase."
+            momentum_fill = 72
+            momentum_bar = "bar-fill-green"
+        elif pace_difference >= -150:
+            momentum_label = "Soft"
+            momentum_copy = "Pace is near normal for this phase."
+            momentum_fill = 48
+            momentum_bar = "bar-fill-yellow"
+        else:
+            momentum_label = "Soft"
+            momentum_copy = "Pace is trailing normal pace."
+            momentum_fill = 24
+            momentum_bar = "bar-fill-red"
+
+    if is_closed:
+        state_copy = (
+            f"Closeout minimum right now is {closeout_floor['line_cooks']} cooks and "
+            f"{closeout_floor['dishwashers']} dish. Time since close is {int(closeout_elapsed * 60)} min."
+        )
+    else:
+        state_copy = (
+            f"Minimum floor right now is {floor_now['line_cooks']} cooks and "
+            f"{floor_now['dishwashers']} dish."
+        )
+
+    recheck_minutes = 15 if decision in {"CUT NOW", "TIGHTEN CLOSEOUT"} else 20 if decision == "PREP TO CUT" else 15
+    next_check = (test_dt + timedelta(minutes=recheck_minutes)).strftime("%I:%M %p").lstrip("0")
+
+    # =========================
+    # EXECUTION GUIDANCE
+    # =========================
+
+    # Hard deadline time for CUT NOW actions
+    cut_deadline = (test_dt + timedelta(minutes=10)).strftime("%I:%M %p").lstrip("0")
+
+    # Per-minute cost of inaction
+    cost_per_minute = max(burn_gap, 0) / 60
+
+    # Projected overage at close if no action taken
+    projected_overage_at_close = max(burn_gap, 0) * max(hours_remaining if not is_closed else 1.0, 0)
+
+    # Build execution command — the single directive a manager acts on
+    if decision == "CUT NOW":
+        exec_role = "Line Cook (Float)" if above_floor_line > 0 else "Dishwasher"
+        exec_command = f"CUT NOW — {exec_role}"
+        exec_saves = f"Saves {money(cost_waiting_15)} in the next 15 min"
+        exec_urgency = f"Every minute you wait costs {money(cost_per_minute)}/min"
+        exec_deadline = f"Do this before {cut_deadline}"
+        exec_color = "#ef4444"
+        exec_border = "#dc2626"
+    elif decision == "TIGHTEN CLOSEOUT":
+        exec_role = "Line Cook (Float)" if line_cooks > closeout_floor["line_cooks"] else "Dishwasher"
+        exec_command = f"TIGHTEN NOW — {exec_role}"
+        exec_saves = f"Saves {money(cost_waiting_15)} before close"
+        exec_urgency = f"Revenue is locked. Every minute costs {money(cost_per_minute)}/min"
+        exec_deadline = f"Do this before {cut_deadline}"
+        exec_color = "#f59e0b"
+        exec_border = "#d97706"
+    elif decision == "PREP TO CUT":
+        exec_role = "Line Cook (Float)" if above_floor_line > 0 else "Dishwasher"
+        exec_command = f"IDENTIFY NEXT CUT — {exec_role}"
+        exec_saves = f"Potential savings if acted at next window: {money(cost_waiting_15 * 2)}"
+        exec_urgency = f"Room is tightening. Burn gap is {money_hr(burn_gap)} over supported level"
+        exec_deadline = f"Recheck at {next_check}"
+        exec_color = "#f59e0b"
+        exec_border = "#d97706"
+    else:
+        exec_command = "HOLD CURRENT STAFFING"
+        exec_saves = "Labor is within supported range"
+        exec_urgency = f"Projected BOH finish: {pct(projected_boh_pct)} vs target {pct(target_boh_pct)}"
+        exec_deadline = f"Recheck at {next_check}"
+        exec_color = "#22c55e"
+        exec_border = "#16a34a"
+
+    # Build cut sequence for the rest of the shift
+    cut_sequence = []
+    if not is_closed and hours_remaining > 0:
+        # Scenario: sales hold as projected
+        remaining_boh_room_hold = target_boh_dollars - boh_labor_so_far
+        affordable_hrs_hold = remaining_boh_room_hold / max(boh_burn_per_hour, 1)
+        if affordable_hrs_hold >= hours_remaining:
+            cut_sequence.append(("If sales hold", "No further cuts needed — finish at current staffing", "green"))
+        else:
+            cut_sequence.append(("If sales hold", f"Cut 1 {('line cook' if above_floor_line > 0 else 'dish')} at {next_check}", "yellow"))
+
+        # Scenario: sales drop 10%
+        sales_drop_10 = projected_final_sales * 0.90
+        boh_target_10 = sales_drop_10 * (target_boh_pct / 100)
+        room_10 = boh_target_10 - boh_labor_so_far
+        hrs_supported_10 = room_10 / max(boh_burn_per_hour, 1)
+        if hrs_supported_10 < hours_remaining * 0.5:
+            cut_sequence.append(("If sales drop 10%", f"Cut 1 line cook immediately + recheck in 15 min", "red"))
+        else:
+            cut_sequence.append(("If sales drop 10%", f"Cut 1 line cook at {next_check}", "yellow"))
+
+        # Scenario: sales drop 20%
+        sales_drop_20 = projected_final_sales * 0.80
+        boh_target_20 = sales_drop_20 * (target_boh_pct / 100)
+        room_20 = boh_target_20 - boh_labor_so_far
+        hrs_supported_20 = room_20 / max(boh_burn_per_hour, 1)
+        if hrs_supported_20 < 0:
+            cut_sequence.append(("If sales drop 20%", "Cut 1 line cook + 1 dish now. Floor is all that's left", "red"))
+        else:
+            cut_sequence.append(("If sales drop 20%", f"Cut 1 line cook at {next_check}, hold dish until decline confirmed", "red"))
+    else:
+        cut_sequence.append(("Closeout", f"Hold at closeout floor: {closeout_floor['line_cooks']} cooks + {closeout_floor['dishwashers']} dish", "yellow"))
+
+    if shift == "Lunch":
+        benchmark_final_sales = BENCHMARK_SALES["Lunch"]
+    else:
+        benchmark_final_sales = BENCHMARK_SALES["Dinner"].get(day_name, BENCHMARK_SALES["Dinner"]["default"])
+
+    benchmark_hourly, expected_hourly, actual_line, projected_hourly = build_sales_vectors(
+        hours_open=hours_open,
+        curve=curve,
+        actual_sales_so_far=sales_so_far,
+        projected_final_sales=projected_final_sales,
+        elapsed_hours=hours_open_so_far,
+        benchmark_final_sales=benchmark_final_sales,
+    )
+
+    affordable_hours_left = boh_room_left / max(boh_burn_per_hour, 1) if boh_room_left > 0 else 0.0
+
+    model = {
+        "day_name": day_name,
+        "shift": shift,
+        "open_t": open_t,
+        "close_t": close_t,
+        "test_t": test_t,
+        "hours_open": hours_open,
+        "hours_open_so_far": hours_open_so_far,
+        "hours_remaining": hours_remaining,
+        "closeout_elapsed": closeout_elapsed,
+        "progress": progress,
+        "phase": phase,
+        "is_closed": is_closed,
+        "sales_so_far": sales_so_far,
+        "average_check": average_check,
+        "covers_so_far": covers_so_far,
+        "total_reservations_today": total_reservations_today,
+        "boh_labor_so_far": boh_labor_so_far,
+        "prep_labor": prep_labor,
+        "foh_labor_so_far": foh_labor_so_far,
+        "line_cooks": line_cooks,
+        "dishwashers": dishwashers,
+        "dining_room_feel": dining_room_feel,
+        "projected_final_sales": projected_final_sales,
+        "expected_sales_so_far": expected_sales_so_far,
+        "target_boh_dollars": target_boh_dollars,
+        "target_total_labor_dollars": target_total_labor_dollars,
+        "current_boh_pct": current_boh_pct,
+        "projected_boh_pct": projected_boh_pct,
+        "projected_total_labor_pct": projected_total_labor_pct,
+        "boh_room_left": boh_room_left,
+        "boh_burn_per_hour": boh_burn_per_hour,
+        "allowed_boh_burn": allowed_boh_burn,
+        "burn_gap": burn_gap,
+        "cost_waiting_15": cost_waiting_15,
+        "remaining_sales_room": remaining_sales_room,
+        "recovery_ratio": recovery_ratio,
+        "actual_sales_pace": actual_sales_pace,
+        "expected_sales_pace": expected_sales_pace,
+        "pace_difference": pace_difference,
+        "hours_until_tight": hours_until_tight,
+        "closeout_room_hours": closeout_window_hours if is_closed else closeout_room_hours,
+        "in_transition": in_transition,
+        "suggested_next_cut": suggested_next_cut,
+        "decision": decision,
+        "hero_class": hero_class,
+        "hero_sub": hero_sub,
+        "what_matters": what_matters,
+        "why_now": why_now,
+        "recovery_label": recovery_label,
+        "recovery_copy": recovery_copy,
+        "recovery_fill": recovery_fill,
+        "recovery_bar": recovery_bar,
+        "pressure_label": pressure_label,
+        "pressure_copy": pressure_copy,
+        "pressure_fill": pressure_fill,
+        "pressure_bar": pressure_bar,
+        "momentum_label": momentum_label,
+        "momentum_copy": momentum_copy,
+        "momentum_fill": momentum_fill,
+        "momentum_bar": momentum_bar,
+        "state_copy": state_copy,
+        "floor_now": floor_now,
+        "closeout_floor": closeout_floor,
+        "next_check": next_check,
+        "happy_hour_note": HH_NOTES.get(day_name, ""),
+        "benchmark_final_sales": benchmark_final_sales,
+        "benchmark_hourly": benchmark_hourly,
+        "expected_hourly": expected_hourly,
+        "actual_line": actual_line,
+        "projected_hourly": projected_hourly,
+        "curve_progress": curve_progress,
+        "affordable_hours_left": affordable_hours_left,
+        "exec_command": exec_command,
+        "exec_saves": exec_saves,
+        "exec_urgency": exec_urgency,
+        "exec_deadline": exec_deadline,
+        "exec_color": exec_color,
+        "exec_border": exec_border,
+        "cut_sequence": cut_sequence,
+        "cost_per_minute": cost_per_minute,
+        "projected_overage_at_close": projected_overage_at_close,
+        # Early shift guard: suppress unreliable projections when shift just started
+        # Threshold: less than 20% through the shift OR less than $1,500 in sales
+        "early_shift_guard": progress < 0.20 or sales_so_far < 1500,
+        "early_recheck_time": (test_dt.replace(hour=test_dt.hour, minute=test_dt.minute) if True else None),
+    }
+    return model
+
+
+def compute_splh(
+    model: dict,
+    target_boh_pct: float,
+    target_total_pct: float,
+    boh_avg_wage: float = 18.0,
+    foh_avg_wage: float = 4.50,
+) -> dict:
+    """
+    Compute Sales Per Labor Hour (SPLH) metrics.
+
+    Hours are estimated from labor dollars using configurable avg wage rates.
+    Defaults: BOH $18/hr, FOH $4.50/hr (Amore blended: servers $1/hr,
+    host $16-17/hr, barback $18/hr — weighted by hours on clock).
+
+    Live SPLH      = sales so far ÷ total hours on clock right now
+    Target SPLH    = blended_wage ÷ target_total_labor_%
+    Projected SPLH = projected final sales ÷ projected total hours at close
+    """
+    BOH_WAGE  = boh_avg_wage
+    FOH_WAGE  = foh_avg_wage
+
+    sales        = model["sales_so_far"]
+    proj_sales   = model["projected_final_sales"]
+    boh_dollars  = model["boh_labor_so_far"]
+    foh_dollars  = model["foh_labor_so_far"]
+    avg_check    = model["average_check"]
+    hrs_elapsed  = max(model["hours_open_so_far"], 0.25)
+    hrs_remaining = model["hours_remaining"]
+    burn_per_hr  = model["boh_burn_per_hour"]
+
+    # Estimated hours on clock right now
+    boh_hours_so_far = boh_dollars / BOH_WAGE
+    foh_hours_so_far = foh_dollars / FOH_WAGE
+    total_hours_so_far = max(boh_hours_so_far + foh_hours_so_far, 0.5)
+
+    # Live SPLH
+    live_splh = sales / total_hours_so_far
+
+    # Projected total hours at close:
+    # remaining BOH hours = burn_per_hr * hours_remaining / BOH_WAGE
+    # remaining FOH hours estimated from FOH hourly rate
+    foh_hourly_rate = foh_dollars / max(hrs_elapsed, 0.25)
+    projected_boh_hours = boh_hours_so_far + (burn_per_hr * hrs_remaining / BOH_WAGE)
+    projected_foh_hours = foh_hours_so_far + (foh_hourly_rate * hrs_remaining / FOH_WAGE)
+    projected_total_hours = max(projected_boh_hours + projected_foh_hours, 0.5)
+    projected_splh = proj_sales / projected_total_hours
+
+    # Target SPLH derived from target labor % and avg check
+    # If target total labor % = 16%, then for every $1 of sales
+    # you spend $0.16 on labor. At avg_check per cover, SPLH target
+    # = avg_check / (target_total_pct / 100) * blended_covers_per_hour
+    # Simpler: target SPLH = 1 / (target_total_pct / 100) per dollar
+    # = $1 of sales requires target_pct cents of labor
+    # Express as: at what SPLH does labor % hit target?
+    # SPLH_target = blended_wage / target_labor_%
+    blended_wage = (boh_dollars * BOH_WAGE + foh_dollars * FOH_WAGE) / max(boh_dollars + foh_dollars, 1)
+    target_splh = blended_wage / (target_total_pct / 100)
+
+    # Color coding
+    if live_splh >= target_splh * 1.05:
+        splh_color = "#22c55e"
+        splh_status = "On target"
+    elif live_splh >= target_splh * 0.90:
+        splh_color = "#f59e0b"
+        splh_status = "Watch"
+    else:
+        splh_color = "#ef4444"
+        splh_status = "Below target"
+
+    return {
+        "live_splh": live_splh,
+        "projected_splh": projected_splh,
+        "target_splh": target_splh,
+        "splh_color": splh_color,
+        "splh_status": splh_status,
+        "total_hours_so_far": total_hours_so_far,
+        "projected_total_hours": projected_total_hours,
+    }
+
+
+# =========================
+# UI HELPERS
+# =========================
+
+def metric_card(label: str, value: str, copy: str) -> None:
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <div class="metric-label">{label}</div>
+            <div class="metric-value">{value}</div>
+            <div class="metric-copy">{copy}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def signal_card(label: str, value: str, copy: str, fill_pct: float, fill_class: str, footer: str = "") -> None:
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <div class="metric-label">{label}</div>
+            <div class="metric-value">{value}</div>
+            <div class="metric-copy">{copy}</div>
+            <div class="bar-wrap">
+                <div class="{fill_class}" style="width:{clamp(fill_pct,0,100)}%;"></div>
+            </div>
+            <div class="metric-copy" style="margin-top:8px;">{footer}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+
+# =========================
+# HEADER
+# =========================
+now_stamp = datetime.now().strftime("%I:%M %p").lstrip("0")
+tz_day = datetime.now().strftime("%A")
+st.markdown(
+    f"""
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
+        <div>
+            <div style="font-size:2.0rem; font-weight:900; letter-spacing:-0.01em;">MarginCommand</div>
+            <div class="small-note">BOH labor decision engine · {now_stamp} Eastern · {tz_day}</div>
+        </div>
+        <div style="text-align:right;">
+            <div class="small-note" style="font-size:0.78rem;">Amore Italian Chophouse</div>
+            <div class="small-note">Manager-first · real-time decisions</div>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# =========================
+# SCENARIO PRESET (full width, above columns)
+# =========================
+scenario_name = st.selectbox("Scenario preset", list(SCENARIOS.keys()), index=0, label_visibility="collapsed")
+scenario = SCENARIOS[scenario_name]
+
+if scenario is None:
+    default_day = "Saturday"
+    default_shift = "Dinner"
+    default_hour12 = 6
+    default_minute = 15
+    default_am_pm = "PM"
+    default_sales = 17020.10
+    default_avg_check = 45.47
+    default_covers = 190.0
+    default_res = 368.0
+    default_boh = 1351.66
+    default_prep = 476.12
+    default_foh = 556.78
+    default_line = st.session_state.pop("override_line_cooks", 6)
+    default_dish = st.session_state.pop("override_dishwashers", 2)
+    default_feel = 3
+else:
+    default_day = scenario["day_name"]
+    default_shift = scenario["shift"]
+    default_hour12 = scenario["hour12"]
+    default_minute = scenario["minute"]
+    default_am_pm = scenario["am_pm"]
+    default_sales = scenario["sales_so_far"]
+    default_avg_check = scenario["average_check"]
+    default_covers = scenario["covers_so_far"]
+    default_res = scenario["total_reservations_today"]
+    default_boh = scenario["boh_labor_so_far"]
+    default_prep = scenario["prep_labor"]
+    default_foh = scenario["foh_labor_so_far"]
+    default_line = st.session_state.pop("override_line_cooks", scenario["line_cooks"])
+    default_dish = st.session_state.pop("override_dishwashers", scenario["dishwashers"])
+    default_feel = scenario["dining_room_feel"]
+
+day_options = list(DAYPART_WINDOWS.keys())
+default_day_index = day_options.index(default_day)
+shift_options = available_shifts_for_day(default_day)
+default_shift_index = shift_options.index(default_shift) if default_shift in shift_options else 0
+
+# =========================
+# TWO COLUMN LAYOUT
+# =========================
+col_left, col_right = st.columns([1.0, 1.4], gap="large")
+
+with col_left:
+    with st.form("shift_inputs", clear_on_submit=False):
+
+        # --- Section 1: Shift Setup ---
+        st.markdown(
+            """
+            <div style="display:flex; align-items:center; gap:10px; margin:16px 0 10px 0;">
+                <div style="background:#1e40af; color:white; border-radius:50%; width:22px; height:22px; display:flex; align-items:center; justify-content:center; font-size:0.72rem; font-weight:900; flex-shrink:0;">1</div>
+                <div style="font-weight:800; font-size:1.0rem;">Shift Setup</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        c1, c2 = st.columns(2)
+        with c1:
+            day_name = st.selectbox("Day of week", day_options, index=default_day_index)
+        with c2:
+            current_shift_options = available_shifts_for_day(day_name)
+            selected_shift_index = current_shift_options.index(default_shift) if default_shift in current_shift_options else 0
+            shift = st.selectbox("Shift", current_shift_options, index=selected_shift_index)
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            hour12 = st.selectbox("Hour", list(range(1, 13)), index=list(range(1, 13)).index(default_hour12))
+        with c2:
+            minute_options = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55]
+            minute = st.selectbox("Minute", minute_options, index=minute_options.index(default_minute), format_func=lambda x: f"{x:02d}")
+        with c3:
+            am_pm = st.selectbox("AM / PM", ["AM", "PM"], index=0 if default_am_pm == "AM" else 1)
+
+        # --- Section 2: Sales ---
+        st.markdown(
+            """
+            <div style="display:flex; align-items:center; gap:10px; margin:16px 0 10px 0;">
+                <div style="background:#1e40af; color:white; border-radius:50%; width:22px; height:22px; display:flex; align-items:center; justify-content:center; font-size:0.72rem; font-weight:900; flex-shrink:0;">2</div>
+                <div style="font-weight:800; font-size:1.0rem;">Sales</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        c1, c2 = st.columns(2)
+        with c1:
+            sales_so_far = st.number_input("Sales so far ($)", min_value=0.0, value=float(default_sales), step=50.0)
+        with c2:
+            average_check = st.number_input("Average check ($)", min_value=0.0, value=float(default_avg_check), step=0.25)
+
+        # --- Section 3: Guests ---
+        st.markdown(
+            """
+            <div style="display:flex; align-items:center; gap:10px; margin:16px 0 10px 0;">
+                <div style="background:#1e40af; color:white; border-radius:50%; width:22px; height:22px; display:flex; align-items:center; justify-content:center; font-size:0.72rem; font-weight:900; flex-shrink:0;">3</div>
+                <div style="font-weight:800; font-size:1.0rem;">Guests</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        c1, c2 = st.columns(2)
+        with c1:
+            covers_so_far = st.number_input("Covers so far", min_value=0.0, value=float(default_covers), step=1.0)
+        with c2:
+            total_reservations_today = st.number_input("Total reservations today", min_value=0.0, value=float(default_res), step=1.0)
+
+        # --- Section 4: Labor & Staff ---
+        st.markdown(
+            """
+            <div style="display:flex; align-items:center; gap:10px; margin:16px 0 10px 0;">
+                <div style="background:#1e40af; color:white; border-radius:50%; width:22px; height:22px; display:flex; align-items:center; justify-content:center; font-size:0.72rem; font-weight:900; flex-shrink:0;">4</div>
+                <div style="font-weight:800; font-size:1.0rem;">Labor &amp; Staff</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        boh_labor_so_far = st.number_input("BOH labor so far ($)", min_value=0.0, value=float(default_boh), step=10.0)
+        prep_labor = st.number_input("Prep labor ($)", min_value=0.0, value=float(default_prep), step=10.0)
+        foh_labor_so_far = st.number_input("FOH labor so far ($)", min_value=0.0, value=float(default_foh), step=10.0)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            line_cooks = st.number_input("Line cooks", min_value=0, value=int(default_line), step=1)
+        with c2:
+            dishwashers = st.number_input("Dishwashers", min_value=0, value=int(default_dish), step=1)
+
+        dining_room_feel = st.slider("Dining room feel", 1, 5, int(default_feel))
+
+        # --- Targets ---
+        st.markdown(
+            "<div style=\"font-weight:700; font-size:0.85rem; color:#94a3b8; text-transform:uppercase; letter-spacing:0.05em; margin:14px 0 8px 0;\">Targets</div>",
+            unsafe_allow_html=True,
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            target_boh_pct = st.number_input("Target BOH %", min_value=1.0, max_value=30.0, value=float(DEFAULT_TARGET_BOH_PCT), step=0.5)
+        with c2:
+            target_total_pct = st.number_input("Target total labor %", min_value=1.0, max_value=40.0, value=float(DEFAULT_TARGET_TOTAL_PCT), step=0.5)
+
+        # --- Wage Rates (for SPLH) ---
+        st.markdown(
+            "<div style=\"font-weight:700; font-size:0.85rem; color:#94a3b8; text-transform:uppercase; letter-spacing:0.05em; margin:14px 0 8px 0;\">Avg Wage Rates</div>",
+            unsafe_allow_html=True,
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            boh_avg_wage = st.number_input("BOH avg wage ($/hr)", min_value=1.0, max_value=50.0, value=20.82, step=0.50)
+        with c2:
+            foh_avg_wage = st.number_input("FOH avg wage ($/hr)", min_value=1.0, max_value=50.0, value=7.58, step=0.25)
+
+        st.form_submit_button("Run MarginCommand →", use_container_width=True)
+
+test_t = current_test_time(hour12, minute, am_pm)
+
+model = build_projection_model(
+    day_name=day_name,
+    shift=shift,
+    test_t=test_t,
+    sales_so_far=sales_so_far,
+    average_check=average_check,
+    covers_so_far=covers_so_far,
+    total_reservations_today=total_reservations_today,
+    boh_labor_so_far=boh_labor_so_far,
+    prep_labor=prep_labor,
+    foh_labor_so_far=foh_labor_so_far,
+    line_cooks=line_cooks,
+    dishwashers=dishwashers,
+    dining_room_feel=dining_room_feel,
+    target_boh_pct=target_boh_pct,
+    target_total_pct=target_total_pct,
+)
+
+splh = compute_splh(model, target_boh_pct, target_total_pct, boh_avg_wage=boh_avg_wage, foh_avg_wage=foh_avg_wage)
+
+# =========================
+# RIGHT COLUMN — OUTPUTS
+# =========================
+
+with col_right:
+
+    # 1. Status bar
+    open_str = model["open_t"].strftime("%I:%M %p").lstrip("0")
+    close_str = model["close_t"].strftime("%I:%M %p").lstrip("0")
+    hours_remaining_text = "Closed" if model["is_closed"] else f"{model['hours_remaining']:.1f} hrs remaining"
+
+    phase_badge_colors = {
+        "OPEN": ("#2563eb", "#dbeafe"),
+        "BUILD": ("#d97706", "#fef3c7"),
+        "PEAK": ("#16a34a", "#dcfce7"),
+        "DECLINE": ("#ea580c", "#ffedd5"),
+        "CLOSEOUT": ("#dc2626", "#fee2e2"),
+    }
+    phase_key = "CLOSEOUT" if model["is_closed"] else model["phase"]
+    pb_bg, pb_text = phase_badge_colors.get(phase_key, ("#475569", "#f8fafc"))
+
+    st.markdown(
+        f"""
+        <div style="display:flex; align-items:center; gap:14px; background:rgba(8,15,32,0.80); border:1px solid rgba(148,163,184,0.18); border-radius:12px; padding:10px 16px; margin-bottom:12px; flex-wrap:wrap;">
+            <div style="background:{pb_bg}; color:{pb_text}; font-size:0.70rem; font-weight:900; text-transform:uppercase; letter-spacing:0.07em; border-radius:6px; padding:3px 9px; flex-shrink:0;">{phase_key}</div>
+            <div class="small-note" style="flex-shrink:0;">Open {model['hours_open_so_far']:.1f} hrs</div>
+            <div class="small-note" style="flex-shrink:0;">{hours_remaining_text}</div>
+            <div class="small-note" style="flex-shrink:0; margin-left:auto;">Close: {close_str}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # 2. Decision hero card
+    st.markdown(
+        f"""
+        <div class="hero {model['hero_class']}">
+            <div class="hero-title">{model['decision']}</div>
+            <div class="hero-sub">{model['hero_sub']}</div>
+            <div class="hero-text">
+                <strong>What matters right now:</strong> {model['what_matters']}. Recheck at {model['next_check']} based on test time.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # 3. Execution Order block — only when not HOLD STEADY
+    if model["decision"] != "HOLD STEADY":
+        exec_color = model["exec_color"]
+        exec_border = model["exec_border"]
+        st.markdown(
+            f"""
+            <div style="
+                background: rgba(8,15,32,0.95);
+                border: 2px solid {exec_border};
+                border-left: 6px solid {exec_color};
+                border-radius: 16px;
+                padding: 18px 20px;
+                margin-bottom: 12px;
+            ">
+                <div style="font-size:0.72rem; font-weight:800; text-transform:uppercase; color:{exec_color}; letter-spacing:0.08em; margin-bottom:6px;">Execution Order</div>
+                <div style="font-size:1.25rem; font-weight:900; color:#f8fafc; margin-bottom:10px; letter-spacing:0.01em;">{model['exec_command']}</div>
+                <div style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom:10px;">
+                    <div style="background:rgba(255,255,255,0.07); border-radius:8px; padding:8px 12px; font-size:0.84rem; font-weight:700; color:#f8fafc;">💰 {model['exec_saves']}</div>
+                    <div style="background:rgba(255,255,255,0.07); border-radius:8px; padding:8px 12px; font-size:0.84rem; font-weight:700; color:#fca5a5;">⏱ {model['exec_urgency']}</div>
+                    <div style="background:{exec_color}22; border:1px solid {exec_border}; border-radius:8px; padding:8px 12px; font-size:0.84rem; font-weight:800; color:{exec_color};">🎯 {model['exec_deadline']}</div>
+                </div>
+                <div style="font-size:0.80rem; color:#94a3b8; margin-top:4px;">{model['why_now']}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    # 4. I Made the Cut button — only when CUT NOW or TIGHTEN CLOSEOUT
+    if model["decision"] in {"CUT NOW", "TIGHTEN CLOSEOUT"}:
+        if st.button("✅ I Made the Cut — Recalculate", use_container_width=True):
+            floor_ref = model["closeout_floor"] if model["is_closed"] else model["floor_now"]
+            if line_cooks > floor_ref["line_cooks"]:
+                st.session_state["override_line_cooks"] = max(line_cooks - 1, floor_ref["line_cooks"])
+            elif dishwashers > floor_ref["dishwashers"]:
+                st.session_state["override_dishwashers"] = max(dishwashers - 1, floor_ref["dishwashers"])
+            st.rerun()
+
+    # 5. Rest of Shift — Cut Sequence — always when not HOLD STEADY
+    if model["decision"] != "HOLD STEADY":
+        cut_sequence = model["cut_sequence"]
+        if cut_sequence:
+            seq_color_map = {"green": "#22c55e", "yellow": "#f59e0b", "red": "#ef4444"}
+            rows_html = ""
+            for label, action, color_key in cut_sequence:
+                c = seq_color_map.get(color_key, "#94a3b8")
+                rows_html += f"""
+                <div style="display:flex; align-items:flex-start; gap:12px; padding:8px 0; border-bottom:1px solid rgba(148,163,184,0.10);">
+                    <div style="min-width:130px; font-size:0.75rem; font-weight:800; color:{c}; text-transform:uppercase; letter-spacing:0.04em; padding-top:2px;">{label}</div>
+                    <div style="font-size:0.85rem; color:#f8fafc;">{action}</div>
+                </div>
+                """
+            st.markdown(
+                f"""
+                <div style="
+                    background: rgba(8,15,32,0.88);
+                    border: 1px solid rgba(148,163,184,0.18);
+                    border-radius: 14px;
+                    padding: 14px 16px;
+                    margin-bottom: 12px;
+                ">
+                    <div style="font-size:0.72rem; font-weight:800; text-transform:uppercase; color:#cbd5e1; letter-spacing:0.06em; margin-bottom:8px;">Rest of Shift — Cut Sequence</div>
+                    {rows_html}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    # 6. Manager Signals — 2x2 grid
+    c1, c2 = st.columns(2)
+    with c1:
+        signal_card(
+            "Momentum",
+            model["momentum_label"],
+            model["momentum_copy"],
+            model["momentum_fill"],
+            model["momentum_bar"],
+            f"Actual pace: {money_hr(model['actual_sales_pace'])} · Expected pace: {money_hr(model['expected_sales_pace']) if not model['is_closed'] else 'Locked'}",
+        )
+    with c2:
+        pressure_footer = (
+            f"Projected BOH finish {pct(model['projected_boh_pct'])} · Decision window: {max(model['hours_until_tight'],0):.2f} hrs"
+            if not model["is_closed"]
+            else f"Projected BOH finish {pct(model['projected_boh_pct'])} · Closeout burn {money_hr(model['boh_burn_per_hour'])}"
+        )
+        signal_card(
+            "Pressure",
+            model["pressure_label"],
+            model["pressure_copy"],
+            model["pressure_fill"],
+            model["pressure_bar"],
+            pressure_footer,
+        )
+
+    c3, c4 = st.columns(2)
+    with c3:
+        signal_card(
+            "Remaining BOH room",
+            model["recovery_label"],
+            model["recovery_copy"],
+            model["recovery_fill"],
+            model["recovery_bar"],
+            f"Remaining BOH room: {money(model['boh_room_left'])}",
+        )
+    with c4:
+        signal_card(
+            "Shift state",
+            model["phase"].title() if not model["is_closed"] else "Closeout",
+            model["state_copy"],
+            65 if not model["is_closed"] else 100,
+            "bar-fill-green" if not model["is_closed"] else "bar-fill-yellow",
+            f"Line cooks on: {model['line_cooks']} · Dish on: {model['dishwashers']}",
+        )
+
+
+# =========================
+# LOWER SECTION — Full width
+# =========================
+
+st.markdown("<hr style='border:none; border-top:1px solid rgba(148,163,184,0.15); margin:24px 0 20px 0;'>", unsafe_allow_html=True)
+
+# Early shift guard — show holding message instead of bad projections
+if model["early_shift_guard"]:
+    recheck_min = model["next_check"]
+    st.markdown(
+        f"""
+        <div style="
+            background: rgba(8,15,32,0.92);
+            border: 1px solid rgba(148,163,184,0.2);
+            border-left: 5px solid #64748b;
+            border-radius: 14px;
+            padding: 18px 22px;
+            margin-bottom: 18px;
+            display: flex;
+            align-items: center;
+            gap: 18px;
+        ">
+            <div style="font-size:1.8rem;">⏳</div>
+            <div>
+                <div style="font-size:0.78rem; font-weight:800; text-transform:uppercase; color:#94a3b8; letter-spacing:0.06em;">Shift just started — projections not yet reliable</div>
+                <div style="font-size:1.05rem; font-weight:700; color:#f8fafc; margin-top:4px;">Enter sales at {recheck_min} for the first reliable read.</div>
+                <div style="font-size:0.82rem; color:#94a3b8; margin-top:4px;">Need at least 20% of the shift (or $1,500 in sales) before the engine can project accurately. Labor metrics below are estimates only.</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+# BOH Room Visual Bar — full width (greyed out during early guard)
+if model["early_shift_guard"]:
+    room_bar_class = "bar-fill-grey" if False else "bar-fill-yellow"
+    # Suppress entirely during early shift
+if not model["early_shift_guard"]:
+    if model["boh_room_left"] > 400:
+        room_bar_class = "bar-fill-green"
+    elif model["boh_room_left"] > 0:
+        room_bar_class = "bar-fill-yellow"
+    else:
+        room_bar_class = "bar-fill-red"
+
+if not model["early_shift_guard"]:
+    room_bar_width = clamp((max(model["boh_room_left"], -600) + 600) / 12, 0, 100)
+    st.markdown(
+        f"""
+        <div class="mini-visual" style="margin-bottom:18px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                <div class="mini-label" style="margin-bottom:0;">BOH Labor Room</div>
+                <div class="small-note">BOH room left: {money(model["boh_room_left"])} · Allowed burn from here: {money_hr(model["allowed_boh_burn"])}</div>
+            </div>
+            <div class="bar-wrap" style="height:18px;">
+                <div class="{room_bar_class}" style="width:{room_bar_width}%;"></div>
+            </div>
+            <div class="small-note" style="margin-top:6px;">How much BOH room remains before missing the finish target. Green = comfortable. Yellow = watch it. Red = over.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+# Early guard label for metric rows
+if model["early_shift_guard"]:
+    st.markdown(
+        "<div style='font-size:0.75rem; font-weight:700; color:#64748b; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:8px;'>⚠ Estimates only — not enough shift data yet</div>",
+        unsafe_allow_html=True,
+    )
+
+def make_gauge(value, target, max_val, title, guard):
+    if value <= target:
+        color = "#22c55e"; label = "On Target"
+    elif value <= target + 5:
+        color = "#f59e0b"; label = "Watch"
+    else:
+        color = "#ef4444"; label = "Over"
+    suffix = " *" if guard else ""
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=value,
+        number={"suffix": "%", "font": {"size": 32, "color": color}},
+        title={"text": f"{title}{suffix}<br><span style='font-size:0.78em;color:#94a3b8;'>{label} · Target {target:.0f}%</span>",
+               "font": {"size": 12, "color": "#cbd5e1"}},
+        gauge={
+            "axis": {"range": [0, max_val], "tickvals": [0, target, max_val],
+                     "ticktext": ["0%", f"{target:.0f}%", f"{max_val:.0f}%"],
+                     "tickfont": {"color": "#94a3b8", "size": 10}},
+            "bar": {"color": color, "thickness": 0.25},
+            "bgcolor": "rgba(0,0,0,0)", "borderwidth": 0,
+            "steps": [
+                {"range": [0, target],          "color": "rgba(34,197,94,0.2)"},
+                {"range": [target, target + 5], "color": "rgba(245,158,11,0.2)"},
+                {"range": [target + 5, max_val],"color": "rgba(239,68,68,0.2)"},
+            ],
+            "threshold": {"line": {"color": "white", "width": 3}, "thickness": 0.85, "value": target},
+        },
+    ))
+    fig.update_layout(paper_bgcolor="rgba(8,15,32,0.92)", plot_bgcolor="rgba(0,0,0,0)",
+                      font={"color": "#f8fafc"}, height=210, margin=dict(l=15, r=15, t=55, b=5))
+    return fig
+
+# Row 1: BOH Gauge + FOH Gauge + Decision Window
+c1, c2, c3 = st.columns([1.0, 1.0, 0.8])
+with c1:
+    current_boh = model["current_boh_pct"]
+    guard = model["early_shift_guard"]
+    st.plotly_chart(
+        make_gauge(current_boh, target_boh_pct, 30.0, "Current BOH Labor %", guard),
+        use_container_width=True,
+        config={"displayModeBar": False},
+    )
+
+with c2:
+    proj_foh = 100 * model["foh_labor_so_far"] / max(model["sales_so_far"], 1)
+    foh_target = target_total_pct - target_boh_pct
+    st.plotly_chart(make_gauge(proj_foh, foh_target, 20.0, "Current FOH Labor %", guard),
+                    use_container_width=True, config={"displayModeBar": False})
+
+with c3:
+    decision_window_text = (
+        f"{max(model['hours_until_tight'], 0) * 60:.0f} min"
+        if not model["is_closed"]
+        else f"{max(model['closeout_room_hours'], 0) * 60:.0f} min"
+    )
+    metric_card("Decision Window", decision_window_text,
+        "Minutes before the labor situation gets more urgent if nothing changes.")
+
+# SPLH Row — suppressed during early shift guard
+if not model["early_shift_guard"]:
+  st.markdown(
+    f"""
+    <div style="
+        background: rgba(8,15,32,0.95);
+        border: 1px solid {splh['splh_color']}44;
+        border-left: 5px solid {splh['splh_color']};
+        border-radius: 14px;
+        padding: 14px 20px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 16px;
+        margin-bottom: 14px;
+    ">
+        <div style="display:flex; align-items:center; gap:16px;">
+            <div>
+                <div style="font-size:0.72rem; font-weight:800; text-transform:uppercase; color:#94a3b8; letter-spacing:0.06em;">Sales Per Labor Hour (SPLH)</div>
+                <div style="font-size:1.6rem; font-weight:900; color:{splh['splh_color']}; margin-top:2px;">${splh['live_splh']:,.0f}/hr</div>
+                <div style="font-size:0.82rem; color:#cbd5e1; margin-top:2px;">{splh['splh_status']} &nbsp;·&nbsp; Target: ${splh['target_splh']:,.0f}/hr</div>
+            </div>
+        </div>
+        <div style="display:flex; gap:24px; flex-wrap:wrap;">
+            <div style="text-align:center;">
+                <div style="font-size:0.70rem; font-weight:800; text-transform:uppercase; color:#94a3b8; letter-spacing:0.05em;">Projected SPLH</div>
+                <div style="font-size:1.1rem; font-weight:800; color:#f8fafc; margin-top:4px;">${splh['projected_splh']:,.0f}/hr</div>
+            </div>
+            <div style="text-align:center;">
+                <div style="font-size:0.70rem; font-weight:800; text-transform:uppercase; color:#94a3b8; letter-spacing:0.05em;">Est. Hours on Clock</div>
+                <div style="font-size:1.1rem; font-weight:800; color:#f8fafc; margin-top:4px;">{splh['total_hours_so_far']:,.1f} hrs</div>
+            </div>
+            <div style="text-align:center;">
+                <div style="font-size:0.70rem; font-weight:800; text-transform:uppercase; color:#94a3b8; letter-spacing:0.05em;">Proj. Total Hours</div>
+                <div style="font-size:1.1rem; font-weight:800; color:#f8fafc; margin-top:4px;">{splh['projected_total_hours']:,.1f} hrs</div>
+            </div>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+  )
+
+# Row 2: 4 burn metrics
+c1, c2, c3, c4 = st.columns(4)
+with c1:
+    metric_card(
+        "BOH Burn / hr",
+        money_hr(model["boh_burn_per_hour"]),
+        "How much your BOH labor is costing per hour right now. This is what you\u2019re spending on kitchen staff every 60 minutes.",
+    )
+with c2:
+    metric_card(
+        "Allowed BOH Burn",
+        money_hr(model["allowed_boh_burn"]),
+        "The maximum you can spend on BOH per hour from this point and still finish at your target labor %. If current burn exceeds this, you\u2019re heading over.",
+    )
+with c3:
+    # Burn gap: negative = room to spare (green), positive = over (red)
+    burn_gap_val = model["burn_gap"]
+    if burn_gap_val <= 0:
+        burn_gap_label = f"Room to spare: {money_hr(abs(burn_gap_val))}"
+        burn_gap_copy = "You're spending less per hour than your target allows — you have labor room left."
+        burn_gap_color = "#22c55e"
+    else:
+        burn_gap_label = f"Over by: {money_hr(burn_gap_val)}"
+        burn_gap_copy = "Your BOH is costing more per hour than remaining sales can justify. Every hour you wait adds to your overage."
+        burn_gap_color = "#ef4444"
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <div class="metric-label">Burn Gap</div>
+            <div class="metric-value" style="color:{burn_gap_color};">{burn_gap_label}</div>
+            <div class="metric-copy">{burn_gap_copy}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+with c4:
+    metric_card(
+        "Cost of Waiting 15 min",
+        money(model["cost_waiting_15"]),
+        "If you do nothing right now, this is what the next 15 minutes of BOH labor will cost you.",
+    )
+
+# Row 3: Profit Check — always-visible compact 4-col row
+c1, c2, c3, c4 = st.columns(4)
+with c1:
+    metric_card(
+        "Actual Sales Pace",
+        money_hr(model["actual_sales_pace"]) if not model["is_closed"] else "Locked",
+        "Your real-time hourly sales rate. Compare to Expected — if above, you're running hot.",
+    )
+with c2:
+    metric_card(
+        "Expected Sales Pace",
+        money_hr(model["expected_sales_pace"]) if not model["is_closed"] else "Locked",
+        "What the shift should be earning right now based on historical demand pattern.",
+    )
+with c3:
+    metric_card(
+        "Remaining BOH Room",
+        money(model["boh_room_left"]),
+        "Dollar cushion remaining before BOH labor exceeds your target for the shift. When this hits zero, you're over.",
+    )
+with c4:
+    # Projected overage: flip copy and color based on over/under
+    overage_val = model["projected_overage_at_close"]
+    boh_room = model["boh_room_left"]
+    if overage_val > 0:
+        overage_label = f"Over by {money(overage_val)}"
+        overage_copy = "Where BOH labor % will land at close if nothing changes. This is your projected finish."
+        overage_color = "#ef4444"
+    elif boh_room > 0:
+        overage_label = f"{money(boh_room)} room left"
+        overage_copy = "BOH is projected to finish under target. You have room to close."
+        overage_color = "#22c55e"
+    else:
+        overage_label = "At target"
+        overage_copy = "BOH is running right at the finish target."
+        overage_color = "#94a3b8"
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <div class="metric-label">BOH Finish Outlook</div>
+            <div class="metric-value" style="color:{overage_color};">{overage_label}</div>
+            <div class="metric-copy">{overage_copy}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+# Row 4: Advanced Metrics — collapsed expander, unchanged
+with st.expander("Advanced Metrics", expanded=False):
+    c1, c2 = st.columns(2)
+
+    hours_remaining_text = "Closed" if model["is_closed"] else f"{model['hours_remaining']:.2f} hrs"
+
+    with c1:
+        st.markdown(f"<div class='subtle'>Projected final sales: {money(model['projected_final_sales'])}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='subtle'>Benchmark sales target: {money(model['benchmark_final_sales'])}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='subtle'>Expected sales so far: {money(model['expected_sales_so_far'])}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='subtle'>Target BOH dollars: {money(model['target_boh_dollars'])}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='subtle'>Target total labor dollars: {money(model['target_total_labor_dollars'])}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='subtle'>Current BOH %: {pct(model['current_boh_pct'])}</div>", unsafe_allow_html=True)
+        current_foh_pct = 100 * model["foh_labor_so_far"] / max(model["sales_so_far"], 1)
+        st.markdown(f"<div class='subtle'>Current FOH %: {pct(current_foh_pct)}</div>", unsafe_allow_html=True)
+    with c2:
+        st.markdown(f"<div class='subtle'>Phase: {model['phase'].title()}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='subtle'>Hours open so far: {model['hours_open_so_far']:.2f} hrs</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='subtle'>Hours remaining: {hours_remaining_text}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='subtle'>Projected loss if ignored 15 min: {money(model['cost_waiting_15'])}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='subtle'>Suggested next move: {model['suggested_next_cut']}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='subtle'>Notes: {model['happy_hour_note']}</div>", unsafe_allow_html=True)
+
+    st.markdown("")
+
+    if model["is_closed"]:
+        close_fig = build_closeout_chart(model)
+        st.plotly_chart(close_fig, use_container_width=True)
+        st.markdown(
+            f"""
+            <div class="blue-box">
+                <div class="blue-title">Right now</div>
+                <div class="blue-copy">
+                    Sales are locked. Burn is running at about {money_hr(model['boh_burn_per_hour'])} through closeout.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        service_fig = build_service_chart(model, model["open_t"])
+        st.plotly_chart(service_fig, use_container_width=True)
+
+        # Pace callout — the single most important number off the chart
+        pace_diff = model["pace_difference"]
+        pace_dir = "ahead of" if pace_diff >= 0 else "behind"
+        pace_color = "#22c55e" if pace_diff >= 0 else "#ef4444"
+        pace_icon = "▲" if pace_diff >= 0 else "▼"
+        st.markdown(
+            f"""
+            <div style="
+                background: rgba(8,15,32,0.95);
+                border: 1px solid {pace_color}44;
+                border-left: 5px solid {pace_color};
+                border-radius: 14px;
+                padding: 14px 18px;
+                display: flex;
+                align-items: center;
+                gap: 16px;
+                margin-top: 4px;
+            ">
+                <div style="font-size: 1.6rem; font-weight: 900; color: {pace_color};">{pace_icon} {money_hr(abs(pace_diff))}</div>
+                <div>
+                    <div style="font-size: 0.78rem; font-weight: 800; text-transform: uppercase; color: #94a3b8; letter-spacing: 0.06em;">Current Sales Pace vs Expected</div>
+                    <div style="font-size: 0.9rem; color: #f8fafc; margin-top: 2px;">
+                        Running <strong style="color:{pace_color};">{pace_dir} expected</strong> right now &nbsp;·&nbsp;
+                        Actual: {money_hr(model['actual_sales_pace'])} &nbsp;·&nbsp; Expected: {money_hr(model['expected_sales_pace'])}
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        benchmark_gap = model["sales_so_far"] - (model["benchmark_final_sales"] * model["curve_progress"])
+        benchmark_dir = "ahead of" if benchmark_gap >= 0 else "behind"
+        benchmark_color = "#22c55e" if benchmark_gap >= 0 else "#f59e0b"
+        st.markdown(
+            f"""
+            <div style="
+                background: rgba(8,15,32,0.95);
+                border: 1px solid {benchmark_color}44;
+                border-left: 5px solid {benchmark_color};
+                border-radius: 14px;
+                padding: 12px 18px;
+                display: flex;
+                align-items: center;
+                gap: 14px;
+                margin-top: 10px;
+            ">
+                <div style="font-size: 1.2rem; font-weight: 900; color: {benchmark_color};">{money(abs(benchmark_gap))}</div>
+                <div>
+                    <div style="font-size: 0.78rem; font-weight: 800; text-transform: uppercase; color: #94a3b8; letter-spacing: 0.06em;">Current Position vs Benchmark</div>
+                    <div style="font-size: 0.88rem; color: #f8fafc; margin-top: 2px;">
+                        Currently <strong style="color:{benchmark_color};">{benchmark_dir} benchmark</strong> right now &nbsp;·&nbsp;
+                        Benchmark target by now: {money(model["benchmark_final_sales"] * model["curve_progress"])}
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
         if burn_gap > 35 and above_floor_line + above_floor_dish > 0:
             decision = "TIGHTEN CLOSEOUT"
         else:
