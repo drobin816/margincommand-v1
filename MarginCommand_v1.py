@@ -587,41 +587,15 @@ def build_sales_vectors(
     return expected_cumulative, actual_cumulative, projected_cumulative
 
 
+
 def build_service_chart(model: dict, open_t: time) -> go.Figure:
-    hours_open   = model["hours_open"]
+    hours_open = model["hours_open"]
     elapsed_hours = model["hours_open_so_far"]
-    bucket_count = len(model["expected_hourly"])
 
-    # Convert bucket indices to real clock-time labels
-    # Each bucket represents (hours_open / bucket_count) hours of the shift
-    bucket_size_hrs = hours_open / bucket_count if hours_open > 0 else 1
-    open_minutes    = open_t.hour * 60 + open_t.minute
-
-    def bucket_to_label(bucket_idx: float) -> str:
-        total_minutes = round(open_minutes + bucket_idx * bucket_size_hrs * 60)
-        h = (total_minutes // 60) % 24
-        m = total_minutes % 60
-        suffix = "AM" if h < 12 else "PM"
-        h12 = h % 12 or 12
-        if m == 0:
-            return f"{h12}{suffix}"
-        return f"{h12}:{m:02d}{suffix}" 
-
-    # Cumulative vectors have bucket_count+1 points (boundaries: open + end of each bucket)
-    bucket_count = len(model["expected_hourly"]) - 1  # expected_hourly is now cumulative
-    x_boundary = list(range(bucket_count + 1))  # 0 .. bucket_count
-
-    # X tick labels at each bucket boundary = clock time at that boundary
-    x_labels = [bucket_to_label(i) for i in x_boundary]
-
-    # TRUE 30-minute ticks based on real time (no drift)
-    total_minutes_open = int(round(hours_open * 60))
-
-    tick_minutes = list(range(0, total_minutes_open + 1, 30))
-    if tick_minutes[-1] != total_minutes_open:
-        tick_minutes.append(total_minutes_open)
-
-    tickvals = [mins / (bucket_size_hrs * 60) for mins in tick_minutes]
+    # expected_hourly is cumulative and has boundary points
+    bucket_count = len(model["expected_hourly"]) - 1
+    bucket_size_hrs = hours_open / bucket_count if bucket_count > 0 else 1.0
+    open_minutes = open_t.hour * 60 + open_t.minute
 
     def fmt_clock(total_minutes: int) -> str:
         h = (total_minutes // 60) % 24
@@ -632,20 +606,29 @@ def build_service_chart(model: dict, open_t: time) -> go.Figure:
             return f"{h12}{suffix}"
         return f"{h12}:{m:02d}{suffix}"
 
-    ticktext = [fmt_clock(open_minutes + mins) for mins in tick_minutes]
+    # Boundary x positions for cumulative curves
+    x_boundary = list(range(bucket_count + 1))
 
-    # Current position in bucket-space (fractional boundary units)
-    marker_x = elapsed_hours / bucket_size_hrs if bucket_size_hrs > 0 else 0
+    # TRUE 30-minute ticks aligned to the chart scale
+    total_minutes_open = int(round(hours_open * 60))
+    tick_minutes = list(range(0, total_minutes_open + 1, 30))
+    if tick_minutes[-1] != total_minutes_open:
+        tick_minutes.append(total_minutes_open)
+
+    tickvals = [(mins / 60) / hours_open * bucket_count for mins in tick_minutes] if hours_open > 0 else [0]
+    ticktext = [fmt_clock(open_minutes + mins) for mins in tick_minutes] if hours_open > 0 else [fmt_clock(open_minutes)]
+
+    # Current position in chart-space
+    marker_x = (elapsed_hours / hours_open) * bucket_count if hours_open > 0 else 0
     marker_x = clamp(marker_x, 0, bucket_count)
-    marker_label = bucket_to_label(marker_x)
+    marker_total_minutes = int(round(open_minutes + elapsed_hours * 60))
+    marker_label = fmt_clock(marker_total_minutes)
 
-    # Actual cumulative: plot whole bucket boundaries up to completed_buckets,
-    # then add one final point at exactly marker_x with actual_sales_so_far
-    # so the line terminates precisely at the vertical 'Now' marker.
+    # Actual cumulative: whole boundaries + exact now point
     actual_cum = model["actual_line"]
     actual_x = []
     actual_y = []
-    completed_buckets_chart = int(marker_x)  # whole buckets completed
+    completed_buckets_chart = int(marker_x)
     for i, val in enumerate(actual_cum):
         if np.isnan(val):
             continue
@@ -653,14 +636,12 @@ def build_service_chart(model: dict, open_t: time) -> go.Figure:
             actual_x.append(float(i))
             actual_y.append(val)
 
-    # Inject terminal point at exact fractional marker position
-    # Y = actual_sales_so_far (the cumulative total at 'now')
     actual_sales_now = model["sales_so_far"]
     if not actual_x or actual_x[-1] < marker_x:
         actual_x.append(marker_x)
         actual_y.append(actual_sales_now)
 
-    # Projected cumulative: from 'now' to close
+    # Projected cumulative: from now to close
     proj_cum = model["projected_hourly"]
     proj_x = []
     proj_y = []
@@ -672,7 +653,6 @@ def build_service_chart(model: dict, open_t: time) -> go.Figure:
 
     fig = go.Figure()
 
-    # Expected cumulative curve
     fig.add_trace(
         go.Scatter(
             x=x_boundary,
@@ -683,7 +663,6 @@ def build_service_chart(model: dict, open_t: time) -> go.Figure:
         )
     )
 
-    # Actual cumulative curve — rises from $0 at open to actual_sales_so_far at now
     fig.add_trace(
         go.Scatter(
             x=actual_x,
@@ -694,7 +673,6 @@ def build_service_chart(model: dict, open_t: time) -> go.Figure:
         )
     )
 
-    # Projected cumulative — continues from now to close
     fig.add_trace(
         go.Scatter(
             x=proj_x,
@@ -737,7 +715,6 @@ def build_service_chart(model: dict, open_t: time) -> go.Figure:
     )
 
     return fig
-
 
 def build_closeout_chart(model: dict) -> go.Figure:
     closeout_window = max(model["closeout_room_hours"], 1.0)
