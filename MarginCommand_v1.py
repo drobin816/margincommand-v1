@@ -190,7 +190,7 @@ st.markdown(
 
     .block-container {
         max-width: 1450px;
-        padding-top: 4.75rem;
+        padding-top: 1.0rem;
         padding-bottom: 2rem;
     }
 
@@ -587,14 +587,19 @@ def build_sales_vectors(
     return expected_cumulative, actual_cumulative, projected_cumulative
 
 
-
 def build_service_chart(model: dict, open_t: time) -> go.Figure:
     hours_open = model["hours_open"]
-    elapsed_hours = model["hours_open_so_far"]
+    hours_open_so_far = model["hours_open_so_far"]
+    expected_cum = model["expected_hourly"]
+    actual_cum = model["actual_line"]
+    projected_cum = model["projected_hourly"]
 
-    # expected_hourly is cumulative and has boundary points
-    bucket_count = len(model["expected_hourly"]) - 1
-    bucket_size_hrs = hours_open / bucket_count if bucket_count > 0 else 1.0
+    bucket_count = len(expected_cum) - 1
+    if bucket_count <= 0 or hours_open <= 0:
+        return go.Figure()
+
+    total_minutes_open = int(round(hours_open * 60))
+    bucket_size_minutes = total_minutes_open / bucket_count
     open_minutes = open_t.hour * 60 + open_t.minute
 
     def fmt_clock(total_minutes: int) -> str:
@@ -602,53 +607,48 @@ def build_service_chart(model: dict, open_t: time) -> go.Figure:
         m = total_minutes % 60
         suffix = "AM" if h < 12 else "PM"
         h12 = h % 12 or 12
-        if m == 0:
-            return f"{h12}{suffix}"
-        return f"{h12}:{m:02d}{suffix}"
+        return f"{h12}:{m:02d}{suffix}" if m else f"{h12}{suffix}"
 
-    # Boundary x positions for cumulative curves
-    x_boundary = list(range(bucket_count + 1))
+    # Real-time x-axis in minutes from open
+    x_boundary = [i * bucket_size_minutes for i in range(bucket_count + 1)]
 
-    # TRUE 30-minute ticks aligned to the chart scale
-    total_minutes_open = int(round(hours_open * 60))
+    # Clean 30-minute ticks on the same minute-based scale
     tick_minutes = list(range(0, total_minutes_open + 1, 30))
     if tick_minutes[-1] != total_minutes_open:
         tick_minutes.append(total_minutes_open)
+    tickvals = tick_minutes
+    ticktext = [fmt_clock(open_minutes + mins) for mins in tick_minutes]
 
-    tickvals = [(mins / 60) / hours_open * bucket_count for mins in tick_minutes] if hours_open > 0 else [0]
-    ticktext = [fmt_clock(open_minutes + mins) for mins in tick_minutes] if hours_open > 0 else [fmt_clock(open_minutes)]
+    # Current marker position in minutes from open
+    marker_x = clamp(hours_open_so_far * 60, 0, total_minutes_open)
+    marker_label = fmt_clock(int(round(open_minutes + marker_x)))
 
-    # Current position in chart-space
-    marker_x = (elapsed_hours / hours_open) * bucket_count if hours_open > 0 else 0
-    marker_x = clamp(marker_x, 0, bucket_count)
-    marker_total_minutes = int(round(open_minutes + elapsed_hours * 60))
-    marker_label = fmt_clock(marker_total_minutes)
-
-    # Actual cumulative: whole boundaries + exact now point
-    actual_cum = model["actual_line"]
+    # Actual cumulative: completed boundaries plus one exact terminal point at now
     actual_x = []
     actual_y = []
-    completed_buckets_chart = int(marker_x)
+    completed_boundaries = int(marker_x // bucket_size_minutes)
+
     for i, val in enumerate(actual_cum):
         if np.isnan(val):
             continue
-        if i <= completed_buckets_chart:
-            actual_x.append(float(i))
+        if i <= completed_boundaries:
+            actual_x.append(i * bucket_size_minutes)
             actual_y.append(val)
 
     actual_sales_now = model["sales_so_far"]
     if not actual_x or actual_x[-1] < marker_x:
         actual_x.append(marker_x)
         actual_y.append(actual_sales_now)
+    elif actual_x[-1] == marker_x:
+        actual_y[-1] = actual_sales_now
 
-    # Projected cumulative: from now to close
-    proj_cum = model["projected_hourly"]
+    # Projected cumulative: from now to close on minute-based scale
     proj_x = []
     proj_y = []
-    for i, val in enumerate(proj_cum):
+    for i, val in enumerate(projected_cum):
         if np.isnan(val):
             continue
-        proj_x.append(float(i))
+        proj_x.append(i * bucket_size_minutes)
         proj_y.append(val)
 
     fig = go.Figure()
@@ -656,7 +656,7 @@ def build_service_chart(model: dict, open_t: time) -> go.Figure:
     fig.add_trace(
         go.Scatter(
             x=x_boundary,
-            y=model["expected_hourly"],
+            y=expected_cum,
             mode="lines",
             name="Expected Pace",
             line=dict(color="rgba(255,255,255,0.65)", width=3, dash="dot"),
@@ -715,6 +715,7 @@ def build_service_chart(model: dict, open_t: time) -> go.Figure:
     )
 
     return fig
+
 
 def build_closeout_chart(model: dict) -> go.Figure:
     closeout_window = max(model["closeout_room_hours"], 1.0)
@@ -898,7 +899,6 @@ def build_projection_model(
 
     above_floor_line = max(line_cooks - floor_now["line_cooks"], 0)
     above_floor_dish = max(dishwashers - floor_now["dishwashers"], 0)
-    above_floor_total = above_floor_line + above_floor_dish
 
     if is_closed:
         if line_cooks > closeout_floor["line_cooks"]:
@@ -915,128 +915,86 @@ def build_projection_model(
         else:
             suggested_next_cut = "At floor. Protect execution"
 
-    # =========================
-    # DECISION ENGINE REFACTOR
-    # =========================
-
-    pace_ratio = (
-        actual_sales_pace / max(expected_sales_pace, 1)
-        if not is_closed and expected_sales_pace > 0
-        else 1.0
+    # Soft night flag: actual sales pace is trailing expected by more than 15%
+    # AND we are past early open. This makes the engine more aggressive on
+    # slow nights where burn gap alone might not trigger a cut.
+    is_soft_night = (
+        not is_closed
+        and progress > 0.20
+        and not small_sample_protection
+        and actual_sales_pace < expected_sales_pace * 0.85
+        and (above_floor_line + above_floor_dish) > 0
     )
 
-    soft_pace = (not is_closed) and pace_ratio < 0.90
-    very_soft_pace = (not is_closed) and pace_ratio < 0.82
-    room_is_tight = boh_room_left <= max(target_boh_dollars * 0.18, 150)
-    burn_is_high = burn_gap > 20
-    burn_is_very_high = burn_gap > 50
-    urgent_window = hours_until_tight < 0.75
-    caution_window = hours_until_tight < 1.50
-
-    confidence_score = 50
-
-    if not small_sample_protection:
-        confidence_score += 15
-    if progress >= 0.25:
-        confidence_score += 10
-    if progress >= 0.45:
-        confidence_score += 5
-    if above_floor_total > 0:
-        confidence_score += 10
-    if abs(burn_gap) >= 20:
-        confidence_score += 5
-    if abs(pace_difference) >= 200:
-        confidence_score += 5
-    if early_phase_protection:
-        confidence_score -= 10
-    if small_sample_protection:
-        confidence_score -= 20
-
-    confidence_score = int(clamp(confidence_score, 15, 95))
-
-    if confidence_score >= 80:
-        confidence_label = "High"
-    elif confidence_score >= 60:
-        confidence_label = "Medium"
-    else:
-        confidence_label = "Low"
+    # Declining momentum flag: pace is below expected AND room is shrinking fast
+    declining_momentum = (
+        not is_closed
+        and pace_difference < -150
+        and boh_room_left < target_boh_dollars * 0.25
+        and (above_floor_line + above_floor_dish) > 0
+    )
 
     if is_closed:
-        if above_floor_total > 0 and burn_gap > 25:
+        if burn_gap > 35 and above_floor_line + above_floor_dish > 0:
             decision = "TIGHTEN CLOSEOUT"
-            decision_band = "CLOSEOUT CONTROL"
         else:
             decision = "CLOSE WITH CONTROL"
-            decision_band = "CLOSEOUT CONTROL"
     else:
         if small_sample_protection:
             decision = "HOLD STEADY"
-            decision_band = "WATCH"
-        elif above_floor_total == 0:
-            decision = "HOLD STEADY"
-            decision_band = "ON TRACK"
-        elif burn_is_very_high and urgent_window:
-            decision = "CUT NOW"
-            decision_band = "ACT NOW"
-        elif very_soft_pace and room_is_tight:
-            decision = "CUT NOW"
-            decision_band = "ACT NOW"
-        elif burn_is_high and caution_window:
-            decision = "PREP TO CUT"
-            decision_band = "PREP"
-        elif soft_pace and above_floor_total > 0:
-            decision = "PREP TO CUT"
-            decision_band = "PREP"
         elif early_phase_protection and burn_gap > 25:
             decision = "PREP TO CUT"
-            decision_band = "WATCH"
-        elif burn_gap > 10 and above_floor_total > 0:
+        elif burn_gap > 55 and hours_until_tight < 1.0 and (above_floor_line + above_floor_dish) > 0:
+            decision = "CUT NOW"
+        elif is_soft_night and burn_gap > 0:
+            # Soft night: pace is trailing and we have room to cut — escalate
+            decision = "CUT NOW" if burn_gap > 30 else "PREP TO CUT"
+        elif declining_momentum:
+            # Room is almost gone and pace is soft — protect the finish
+            decision = "CUT NOW" if hours_until_tight < 0.5 else "PREP TO CUT"
+        elif burn_gap > 15 and (above_floor_line + above_floor_dish) > 0:
             decision = "PREP TO CUT"
-            decision_band = "WATCH"
         else:
             decision = "HOLD STEADY"
-            decision_band = "ON TRACK"
 
     if decision == "HOLD STEADY":
         hero_class = "hero-green"
-        hero_sub = f"{decision_band} · {confidence_label} confidence"
+        hero_sub = "Current staffing still fits the moment."
         if phase == "PEAK":
-            what_matters = "You are in the strongest demand window. Protect execution and keep labor stable."
+            what_matters = "You are in the strongest demand window. Labor decisions matter most here"
         elif phase == "DECLINE":
-            what_matters = "Peak has passed, but current staffing is still supported by the finish."
+            what_matters = "Peak has passed. Sales are still coming in, but the slope is weakening"
         else:
-            what_matters = "The room is still building. Do not overreact to isolated pockets."
+            what_matters = "The room is still building. Pace matters more than isolated tickets"
     elif decision == "PREP TO CUT":
         hero_class = "hero-orange"
-        hero_sub = f"{decision_band} · {confidence_label} confidence"
-        what_matters = "The room is tightening. Start staging the next reduction without hurting execution."
+        hero_sub = "Room is tightening. Start lining up the next move without hurting execution."
+        what_matters = "Decline phase. Start identifying the next cut while protecting service"
     elif decision == "CUT NOW":
         hero_class = "hero-red"
-        hero_sub = f"{decision_band} · {confidence_label} confidence"
-        what_matters = "Remaining revenue no longer supports current staffing. Protect the finish now."
+        hero_sub = "Remaining revenue no longer supports current staffing."
+        what_matters = "Make the next reduction now to protect the finish"
     elif decision == "TIGHTEN CLOSEOUT":
         hero_class = "hero-orange"
-        hero_sub = f"{decision_band} · {confidence_label} confidence"
-        what_matters = "Revenue is done. You are above closeout floor and still burning unnecessary labor."
+        hero_sub = "Final sales are locked. You are above closeout floor and still burning unnecessary labor."
+        what_matters = "Revenue is done. Tighten one closeout position now"
     else:
         hero_class = "hero-blue"
-        hero_sub = f"{decision_band} · {confidence_label} confidence"
-        what_matters = "Revenue is locked. Finish clean, move with purpose, and get out under control."
+        hero_sub = "Final sales are locked. Finish clean and get the team out inside target."
+        what_matters = "Revenue is done. Close with purpose and keep the team moving"
 
     if is_closed:
         why_now = (
             f"Sales are locked. Current BOH burn is {money_hr(boh_burn_per_hour)}. "
-            f"Remaining BOH room is {money(boh_room_left)}. "
-            f"Closeout floor is {closeout_floor['line_cooks']} cooks and {closeout_floor['dishwashers']} dish. "
-            f"Confidence is {confidence_label.lower()} at {confidence_score}/100."
+            f"Remaining BOH room is {money(boh_room_left)}. Closeout floor is "
+            f"{closeout_floor['line_cooks']} cooks and {closeout_floor['dishwashers']} dish."
         )
     else:
         why_now = (
             f"Actual pace is {'ahead of' if pace_difference >= 0 else 'behind'} expected by "
             f"{money_hr(abs(pace_difference))}. Current BOH burn is {money_hr(boh_burn_per_hour)} "
             f"vs allowed burn {money_hr(allowed_boh_burn)}. Remaining BOH room is {money(boh_room_left)}. "
-            f"Floor is {floor_now['line_cooks']} cooks and {floor_now['dishwashers']} dish. "
-            f"Confidence is {confidence_label.lower()} at {confidence_score}/100."
+            f"Floor is {floor_now['line_cooks']} cooks and {floor_now['dishwashers']} dish."
         )
 
     if is_closed:
@@ -1252,10 +1210,6 @@ def build_projection_model(
         "in_transition": in_transition,
         "suggested_next_cut": suggested_next_cut,
         "decision": decision,
-        "decision_band": decision_band,
-        "confidence_score": confidence_score,
-        "confidence_label": confidence_label,
-        "pace_ratio": pace_ratio,
         "hero_class": hero_class,
         "hero_sub": hero_sub,
         "what_matters": what_matters,
@@ -1655,8 +1609,8 @@ with col_right:
     st.markdown(
         f"""
         <div class="hero {model['hero_class']}">
-            <div class="hero-title">{model['decision_band']}</div>
-            <div class="hero-sub">{model['hero_sub']} · {model['confidence_score']}/100</div>
+            <div class="hero-title">{model['decision']}</div>
+            <div class="hero-sub">{model['hero_sub']}</div>
             <div class="hero-text">
                 <strong>What matters right now:</strong> {model['what_matters']}. Recheck at {model['next_check']} based on test time.
             </div>
